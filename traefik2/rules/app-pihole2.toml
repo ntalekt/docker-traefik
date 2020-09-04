@@ -1,0 +1,20 @@
+[http.routers]
+  [http.routers.pihole2-rtr]
+      entryPoints = ["https"]
+      rule = "Host(`pihole2.example.com`)"
+      service = "pihole2-svc"
+      middlewares = ["chain-no-auth", "pihole2-add-admin"]
+      [http.routers.pihole2-rtr.tls]
+        certresolver = "dns-cloudflare"
+
+[http.middlewares]
+  [http.middlewares.pihole2-add-admin.addPrefix]
+    prefix = "/admin"
+
+[http.services]
+  [http.services.pihole2-svc]
+    [http.services.pihole2-svc.loadBalancer]
+      passHostHeader = true
+      [[http.services.pihole2-svc.loadBalancer.servers]]
+        url = "http://192.168.1.252"
+
