@@ -1,0 +1,16 @@
+[http.routers]
+  [http.routers.nas-rtr]
+      entryPoints = ["https"]
+      rule = "Host(`nas.example.com`)"
+      service = "nas-svc"
+      middlewares = ["chain-no-auth"]
+      [http.routers.nas-rtr.tls]
+        certresolver = "dns-cloudflare"
+
+[http.services]
+  [http.services.nas-svc]
+    [http.services.nas-svc.loadBalancer]
+      passHostHeader = true
+      [[http.services.nas-svc.loadBalancer.servers]]
+        url = "http://192.168.1.108:8080"
+
