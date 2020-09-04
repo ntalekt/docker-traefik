@@ -1,0 +1,15 @@
+[http.routers]
+  [http.routers.radarr-rtr]
+      entryPoints = ["https"]
+      rule = "Host(`radarr.example.com`)"
+      service = "radarr-svc"
+      middlewares = ["chain-no-auth"]
+      [http.routers.radarr-rtr.tls]
+        certresolver = "dns-cloudflare"
+
+[http.services]
+  [http.services.radarr-svc]
+    [http.services.radarr-svc.loadBalancer]
+      passHostHeader = true
+      [[http.services.radarr-svc.loadBalancer.servers]]
+        url = "http://192.168.1.108:7878"
