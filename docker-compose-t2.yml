@@ -1,0 +1,573 @@
+version: "3.7"
+
+########################### NETWORKS
+networks:
+  t2_proxy:
+    external:
+      name: t2_proxy
+  default:
+    driver: bridge
+
+########################### SERVICES
+services:
+# All services / apps go below this line
+# Traefik 2 - Reverse Proxy
+  traefik:
+    container_name: traefik
+    image: traefik:2.2.1 # the chevrotin tag refers to v2.2.x but introduced a breaking change in 2.2.2
+    restart: unless-stopped
+    command: # CLI arguments
+      - --global.checkNewVersion=true
+      - --global.sendAnonymousUsage=true
+      - --entryPoints.http.address=:80
+      - --entryPoints.https.address=:443
+        # Allow these IPs to set the X-Forwarded-* headers - Cloudflare IPs: https://www.cloudflare.com/ips/
+      - --entrypoints.https.forwardedHeaders.trustedIPs=173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/12,172.64.0.0/13,131.0.72.0/22
+      - --entryPoints.traefik.address=:8080
+      - --api=true
+#      - --api.insecure=true
+      - --serversTransport.insecureSkipVerify=true # to make unifi dashboard work
+      - --log=true
+      - --log.level=DEBUG # (Default: error) DEBUG, INFO, WARN, ERROR, FATAL, PANIC
+      - --accessLog=true
+      - --accessLog.filePath=/traefik.log
+      - --accessLog.bufferingSize=100 # Configuring a buffer of 100 lines
+      - --accessLog.filters.statusCodes=400-499
+      - --providers.docker=true
+      - --providers.docker.endpoint=unix:///var/run/docker.sock
+      - --providers.docker.defaultrule=Host(`{{ index .Labels "com.docker.compose.service" }}.$DOMAINNAME`)
+      - --providers.docker.exposedByDefault=false
+      - --providers.docker.network=t2_proxy
+      - --providers.docker.swarmMode=false
+      - --providers.file.directory=/rules # Load dynamic configuration from one or more .toml or .yml files in a directory.
+#      - --providers.file.filename=/path/to/file # Load dynamic configuration from a file.
+      - --providers.file.watch=true # Only works on top level files in the rules folder
+#      - --certificatesResolvers.dns-cloudflare.acme.caServer=https://acme-staging-v02.api.letsencrypt.org/directory # LetsEncrypt Staging Server - uncomment when testing
+      - --certificatesResolvers.dns-cloudflare.acme.email=$CLOUDFLARE_EMAIL
+      - --certificatesResolvers.dns-cloudflare.acme.storage=/acme.json
+      - --certificatesResolvers.dns-cloudflare.acme.dnsChallenge.provider=cloudflare
+      - --certificatesResolvers.dns-cloudflare.acme.dnsChallenge.resolvers=1.1.1.1:53,1.0.0.1:53
+    networks:
+      - t2_proxy
+    ports:
+      - target: 80
+        published: 80
+        protocol: tcp
+        mode: host
+      - target: 443
+        published: 443
+        protocol: tcp
+        mode: host
+      - target: 8080
+        published: 8080
+        protocol: tcp
+        mode: host
+    volumes:
+      - $DOCKERDIR/traefik2/rules:/rules 
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - $DOCKERDIR/traefik2/acme/acme.json:/acme.json 
+      - $DOCKERDIR/traefik2/traefik.log:/traefik.log 
+      - $DOCKERDIR/common/shared:/shared
+    environment:
+      - CF_API_EMAIL=$CLOUDFLARE_EMAIL
+      - CF_API_KEY=$CLOUDFLARE_API_KEY
+    labels:
+      - "traefik.enable=true"
+      # HTTP-to-HTTPS Redirect
+      - "traefik.http.routers.http-catchall.entrypoints=http"
+      - "traefik.http.routers.http-catchall.rule=HostRegexp(`{host:.+}`)"
+      - "traefik.http.routers.http-catchall.middlewares=redirect-to-https"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+      # HTTP Routers
+      - "traefik.http.routers.traefik-rtr.entrypoints=https"
+      - "traefik.http.routers.traefik-rtr.rule=Host(`traefik.$DOMAINNAME`)"
+      - "traefik.http.routers.traefik-rtr.tls=true"
+#      - "traefik.http.routers.traefik-rtr.tls.certresolver=dns-cloudflare" # Comment out this line after first run of traefik to force the use of wildcard certs
+      - "traefik.http.routers.traefik-rtr.tls.domains[0].main=$DOMAINNAME"
+      - "traefik.http.routers.traefik-rtr.tls.domains[0].sans=*.$DOMAINNAME"
+#      - "traefik.http.routers.traefik-rtr.tls.domains[1].main=$SECONDDOMAINNAME" # Pulls main cert for second domain
+#      - "traefik.http.routers.traefik-rtr.tls.domains[1].sans=*.$SECONDDOMAINNAME" # Pulls wildcard cert for second domain
+      ## Services - API
+      - "traefik.http.routers.traefik-rtr.service=api@internal"
+      ## Middlewares
+      - "traefik.http.routers.traefik-rtr.middlewares=chain-no-auth@file"
+
+# Portainer - WebUI for Containers
+  portainer:
+    container_name: portainer
+    image: portainer/portainer:latest
+    restart: unless-stopped
+    command: -H unix:///var/run/docker.sock --no-auth
+    networks:
+      - t2_proxy
+    security_opt:
+      - no-new-privileges:true
+  #      ports:
+  #        - "$PORTAINER_PORT:9000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - $DOCKERDIR/portainer/data:/data 
+    environment:
+      - TZ=$TZ
+    labels:
+      - "traefik.enable=true"
+      ## HTTP Routers
+      - "traefik.http.routers.portainer-rtr.entrypoints=https"
+      - "traefik.http.routers.portainer-rtr.rule=Host(`portainer.$DOMAINNAME`)"
+      - "traefik.http.routers.portainer-rtr.tls=true"
+      ## Middlewares
+      - "traefik.http.routers.portainer-rtr.middlewares=chain-no-auth@file" # No Authentication
+  #      - "traefik.http.routers.portainer-rtr.middlewares=chain-basic-auth@file" # Basic Authentication
+  #      - "traefik.http.routers.portainer-rtr.middlewares=chain-oauth@file" # Google OAuth 2.0
+      ## HTTP Services
+      - "traefik.http.routers.portainer-rtr.service=portainer-svc"
+      - "traefik.http.services.portainer-svc.loadbalancer.server.port=9000"
+
+# Organizr - Unified HTPC/Home Server Web Interface
+  organizr:
+    container_name: organizr
+    image: organizrtools/organizr-v2:latest
+    restart: unless-stopped
+    networks:
+      - t2_proxy
+    security_opt:
+      - no-new-privileges:true
+  #    ports:
+  #      - "$ORGANIZR_PORT:80"
+    volumes:
+      - $DOCKERDIR/organizr/config:/config
+    environment:
+      - PUID=$PUID
+      - PGID=$PGID
+      - TZ=$TZ
+    labels:
+      - "traefik.enable=true"
+      ## HTTP Routers
+      - "traefik.http.routers.organizr-rtr.entrypoints=https"
+      - "traefik.http.routers.organizr-rtr.rule=Host(`organizr.$DOMAINNAME`)" 
+      - "traefik.http.routers.organizr-rtr.tls=true"
+      ## Middlewares
+      - "traefik.http.routers.organizr-rtr.middlewares=chain-no-auth@file" # No Authentication 
+      ## HTTP Services
+      - "traefik.http.routers.organizr-rtr.service=organizr-svc"
+      - "traefik.http.services.organizr-svc.loadbalancer.server.port=80"
+
+# Home Assistant - Open source home automation
+  homeassistant:
+    image: homeassistant/home-assistant:latest
+    container_name: homeassistant
+    restart: unless-stopped
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    network_mode: "host"
+#    privileged: true
+    volumes:
+      - $DOCKERDIR/home-assistant/config:/config
+      - $DOCKERDIR/common/shared:/shared
+      - /var/run/docker.sock:/var/run/docker.sock # Needed for ualex73/monitor_docker
+
+# Dozzle - Real-time Docker Log Viewer
+  dozzle:
+    image: amir20/dozzle:latest
+    container_name: dozzle
+    restart: unless-stopped
+    networks:
+      - t2_proxy
+    environment:
+      DOZZLE_LEVEL: info
+      DOZZLE_TAILSIZE: 300
+      DOZZLE_FILTER: "status=running"
+      # DOZZLE_FILTER: "label=log_me" # limits logs displayed to containers with this label
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    labels:
+      - "traefik.enable=true"
+      ## HTTP Routers
+      - "traefik.http.routers.dozzle-rtr.entrypoints=https"
+      - "traefik.http.routers.dozzle-rtr.rule=Host(`dozzle.$DOMAINNAME`)"
+      - "traefik.http.routers.dozzle-rtr.tls=true" 
+      ## Middlewares
+      - "traefik.http.routers.dozzle-rtr.middlewares=chain-no-auth@file" # No Authentication
+      ## HTTP Services
+      - "traefik.http.routers.dozzle-rtr.service=dozzle-svc"
+      - "traefik.http.services.dozzle-svc.loadbalancer.server.port=8080"
+
+######### DOWNLOADERS ##########
+
+# Deluge with VPN
+  deluge:
+    image: binhex/arch-delugevpn
+    container_name: delugevpn
+    restart: unless-stopped
+    networks: 
+      t2_proxy: 
+        ipv4_address: 172.18.0.7
+    ports:
+  #      - "XXXX:8112"
+      - "58846:58846"
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - PUID=0
+      - PGID=0
+      - TZ=${TZ}
+      - VPN_ENABLED=yes
+      - VPN_USER=${VPN_USER}
+      - VPN_PASS=${VPN_PASS}
+      - VPN_PROV=pia
+      - STRICT_PORT_FORWARD=yes
+      - ENABLE_PRIVOXY=no
+      - LAN_NETWORK=192.168.20.0/24
+      - NAME_SERVERS=209.222.18.222,84.200.69.80,37.235.1.174,1.1.1.1,209.222.18.218,37.235.1.177,84.200.70.40,1.0.0.1
+      - DELUGE_DAEMON_LOG_LEVEL=info
+      - DELUGE_WEB_LOG_LEVEL=info
+      - UMASK=000
+      - DEBUG=false
+    labels:
+      - "traefik.enable=true"
+      ## HTTP Routers
+      - "traefik.http.routers.deluge-rtr.entrypoints=https"
+      - "traefik.http.routers.deluge-rtr.rule=Host(`deluge.$DOMAINNAME`)"
+      - "traefik.http.routers.deluge-rtr.tls=true" 
+      ## Middlewares
+      - "traefik.http.routers.deluge-rtr.middlewares=chain-no-auth@file" # No Authentication
+      ## HTTP Services
+      - "traefik.http.routers.deluge-rtr.service=deluge-svc"
+      - "traefik.http.services.deluge-svc.loadbalancer.server.port=8112"
+    volumes:
+      - /mnt/nas2media/torrent-download:/data
+      - $DOCKERDIR/arch-delugevpn/config:/config
+      - $DOCKERDIR/common/shared:/shared
+
+######### PERSONAL VIDEO RECORDERS ##########
+
+# Sonarr – TV Show Download and Management
+  sonarr:
+    image: "linuxserver/sonarr"
+    container_name: "sonarr"
+    restart: unless-stopped
+    networks:
+      - t2_proxy
+  #    ports:
+  #        - "XXXX:8989"
+    environment:
+      - PUID=0
+      - PGID=0
+      - TZ=${TZ}
+    labels:
+      - "traefik.enable=true"
+      ## HTTP Routers
+      - "traefik.http.routers.sonarr-rtr.entrypoints=https"
+      - "traefik.http.routers.sonarr-rtr.rule=Host(`sonarr.$DOMAINNAME`)"
+      - "traefik.http.routers.sonarr-rtr.tls=true" 
+      ## Middlewares
+      - "traefik.http.routers.sonarr-rtr.middlewares=chain-no-auth@file" # No Authentication
+      ## HTTP Services
+      - "traefik.http.routers.sonarr-rtr.service=sonarr-svc"
+      - "traefik.http.services.sonarr-svc.loadbalancer.server.port=8989"
+    volumes:
+      - $DOCKERDIR/sonarr/config:/config
+      - /mnt/nas2media/torrent-download/completed:/downloads
+      - /mnt/nas2media/Videos/TV:/tv
+      - "/etc/localtime:/etc/localtime:ro"
+      - $DOCKERDIR/common/shared:/shared
+
+# Lidarr - Music Download and Management
+  lidarr:
+    image: "linuxserver/lidarr"
+    container_name: "lidarr"
+    restart: unless-stopped
+    networks:
+      - t2_proxy
+  #    ports:
+  #      - "XXXX:8686"
+    environment:
+      - PUID=0
+      - PGID=0
+      - TZ=${TZ}
+    labels:
+      - "traefik.enable=true"
+      ## HTTP Routers
+      - "traefik.http.routers.lidarr-rtr.entrypoints=https"
+      - "traefik.http.routers.lidarr-rtr.rule=Host(`lidarr.$DOMAINNAME`)"
+      - "traefik.http.routers.lidarr-rtr.tls=true" 
+      ## Middlewares
+      - "traefik.http.routers.lidarr-rtr.middlewares=chain-no-auth@file" # No Authentication
+      ## HTTP Services
+      - "traefik.http.routers.lidarr-rtr.service=lidarr-svc"
+      - "traefik.http.services.lidarr-svc.loadbalancer.server.port=8686"
+    volumes:
+      - $DOCKERDIR/lidarr/config:/config
+      - /mnt/nas2media/torrent-download/completed:/downloads
+      - /mnt/nas2media/Music:/music
+      - "/etc/localtime:/etc/localtime:ro"
+      - $DOCKERDIR/common/shared:/shared
+
+######### INDEXER ##########
+  jackett:
+    image: "linuxserver/jackett"
+    container_name: "jackett"
+    restart: unless-stopped
+    networks:
+      - t2_proxy
+  #    ports:
+  #      - "XXXX:9117"
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    labels:
+      - "traefik.enable=true"
+      ## HTTP Routers
+      - "traefik.http.routers.jackett-rtr.entrypoints=https"
+      - "traefik.http.routers.jackett-rtr.rule=Host(`jackett.$DOMAINNAME`)"
+      - "traefik.http.routers.jackett-rtr.tls=true" 
+      ## Middlewares
+      - "traefik.http.routers.jackett-rtr.middlewares=chain-no-auth@file" # No Authentication
+      ## HTTP Services
+      - "traefik.http.routers.jackett-rtr.service=jackett-svc"
+      - "traefik.http.services.jackett-svc.loadbalancer.server.port=9117"
+    volumes:
+      - $DOCKERDIR/jacket/config:/config
+      - /mnt/nas2media/torrent-download/completed:/downloads
+      - "/etc/localtime:/etc/localtime:ro"
+      - $DOCKERDIR/common/shared:/shared
+
+######### MEDIA SERVER APPS ##########
+  embyserver:
+    image: "emby/embyserver:latest"
+    container_name: "embyserver"
+    restart: unless-stopped
+    networks:
+      - t2_proxy
+    devices:
+      - "/dev/dri:/dev/dri"
+    ports:
+      - "8096:8096"
+  #      - "8920:8920"
+    environment:
+      - UID=${PUID}
+      - GID=${PGID}
+      - TZ=${TZ}
+      - GIDLIST=100
+    labels:
+      - "traefik.enable=true"
+      ## HTTP Routers
+      - "traefik.http.routers.emby-rtr.entrypoints=https"
+      - "traefik.http.routers.emby-rtr.rule=Host(`emby.$DOMAINNAME`)"
+      - "traefik.http.routers.emby-rtr.tls=true" 
+      ## Middlewares
+      - "traefik.http.routers.emby-rtr.middlewares=chain-no-auth@file" # No Authentication
+      ## HTTP Services
+      - "traefik.http.routers.emby-rtr.service=emby-svc"
+      - "traefik.http.services.emby-svc.loadbalancer.server.port=8096"
+    volumes:
+      - $DOCKERDIR/embyserver/config:/config
+      - /mnt/nas2media/Videos:/mnt/share1
+      - "/etc/localtime:/etc/localtime:ro"
+      - $DOCKERDIR/common/shared:/shared
+
+######### DOCKER RELATED ##########
+
+# Watchtower - Automatic Update of Containers/Apps      
+  watchtower:
+    image: v2tec/watchtower
+    container_name: watchtower
+    restart: always
+    command: --schedule "0 0 23 * * SUN" --cleanup
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - WATCHTOWER_NOTIFICATIONS=email
+      - WATCHTOWER_NOTIFICATION_EMAIL_FROM=${CLOUDFLARE_EMAIL}
+      - WATCHTOWER_NOTIFICATION_EMAIL_TO=${CLOUDFLARE_EMAIL}
+      - WATCHTOWER_NOTIFICATION_EMAIL_SERVER=smtp.gmail.com
+      - WATCHTOWER_NOTIFICATION_EMAIL_SERVER_PORT=587
+      - WATCHTOWER_NOTIFICATION_EMAIL_SERVER_USER=${CLOUDFLARE_EMAIL}
+      - WATCHTOWER_NOTIFICATION_EMAIL_SERVER_PASSWORD=${EMAIL_PASS}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+# Slack-docker - Slack Integration for notifying Docker events     
+  slackdocker:
+    image: int128/slack-docker
+    container_name: slack-docker
+    restart: always
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - webhook=${SLACK_WEBHOOK}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+######### Network RELATED ##########
+# cloudflared - proxy-dns on port 5054 using the DNS over HTTPS     
+#  cloudflared:
+#    image: visibilityspots/cloudflared:amd64
+#    container_name: cloudflared
+#    restart: always
+#    network_mode: "host"
+#    privileged: "true"
+#    environment:
+#      - PUID=${PUID}
+#      - PGID=${PGID}
+#      - TZ=${TZ}
+#      - DNS1=1.1.1.1
+#      - DNS2=1.0.0.1
+
+  cloudflared:
+    image: crazymax/cloudflared:latest
+    container_name: cloudflared
+    restart: always
+    ports:
+      - target: 5053
+        published: 5054
+        protocol: udp
+      - target: 49312
+        published: 49312
+        protocol: tcp
+    environment:
+      - TZ=${TZ}
+      - "TUNNEL_DNS_UPSTREAM=https://1.1.1.1/dns-query,https://1.0.0.1/dns-query"
+
+# UniFi Controller - Managing UniFi Network
+# UDP 3478 Port used for STUN. #REQUIRED
+# TCP 5514 Port used for remote syslog capture.
+# TCP 8080 Port used for device and controller communication. #REQUIRED
+# TCP 8443 Port used for controller GUI/API as seen in a web browser #REQUIRED
+# TCP 8880 Port used for HTTP portal redirection.
+# TCP 8843 Port used for HTTPS portal redirection.
+# TCP 6789 Port used for UniFi mobile speed test. #REQUIRED
+# TCP 27117 Port used for local-bound database communication.
+# UDP 5656-5699 Ports used by AP-EDU broadcasting.
+# UDP 10001 Port used for device discovery #REQUIRED
+# UDP 1900 Port used for "Make controller discoverable on L2 network" in controller settings. 
+# set-inform http://<HOST>:8080/inform
+#  unifi:
+#    image: jacobalberty/unifi
+#    container_name: unifi
+#    restart: unless-stopped
+#    networks:
+#      - t2_proxy
+#    ports:
+#      - "32780:8080"
+#      - "8443:8443"
+#      - "3478:3478/udp"
+#      - "10001:10001/udp"
+#      - "6789:6789"
+#      #- "8081:8081"
+#      #- "8843:8843"
+#      #- "8880:8880"
+#    environment:
+#      - PUID=${PUID}
+#      - PGID=${PGID}
+#      - TZ=${TZ}
+#    volumes:
+#      - $DOCKERDIR/unifi-controller/config:/unifi
+#      - "/etc/localtime:/etc/localtime:ro"
+#      - $DOCKERDIR/common/shared:/shared
+
+# cloudflared - use CloudFlare DNS Service as DDNS 
+  cloudflaredddns:
+    image: oznu/cloudflare-ddns
+    container_name: cloudflared-ddns
+    restart: always
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - EMAIL=${CLOUDFLARE_EMAIL}
+      - API_KEY=${CLOUDFLARE_API_KEY}
+      - ZONE=${DOMAINNAME}
+
+# A docker container to run InfluxDB and Grafana with persistence
+  influxdb-grafana:
+    image: "philhawthorne/docker-influxdb-grafana:latest"
+    container_name: "influxdb-grafana"
+    restart: unless-stopped
+    networks:
+      - t2_proxy
+    ports:
+  #        - "XXXX:3003"
+        - "3004:8888"
+        - "8086:8086"
+    environment:
+      - PUID=0
+      - PGID=0
+      - TZ=${TZ}
+    labels:
+      - "traefik.enable=true"
+      ## HTTP Routers
+      - "traefik.http.routers.grafana-rtr.entrypoints=https"
+      - "traefik.http.routers.grafana-rtr.rule=Host(`grafana.$DOMAINNAME`)"
+      - "traefik.http.routers.grafana-rtr.tls=true" 
+      ## Middlewares
+      - "traefik.http.routers.grafana-rtr.middlewares=chain-no-auth@file" # No Authentication
+      ## HTTP Services
+      - "traefik.http.routers.grafana-rtr.service=grafana-svc"
+      - "traefik.http.services.grafana-svc.loadbalancer.server.port=3003"
+    volumes:
+      - $DOCKERDIR/influxdb-grafana/config/influxdb:/var/lib/influxdb
+      - $DOCKERDIR/influxdb-grafana/config/grafana:/var/lib/grafana
+      - $DOCKERDIR/common/shared:/shared
+
+# Collect ALL UniFi Controller, Device & Client Data - Export to InfluxDB & Grafana
+  unifi-poller:
+    image: golift/unifi-poller:stable
+    container_name: unifi-poller
+    restart: always
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - $DOCKERDIR/unifi-poller/config/up.conf:/config/unifi-poller.conf
+
+# Rancher
+#  rancher:
+#    image: rancher/rancher
+#    container_name: rancher
+#    restart: unless-stopped
+#    networks:
+#      - t2_proxy
+#    environment:
+#      - PUID=${PUID}
+#      - PGID=${PGID}
+#      - TZ=${TZ}
+#    labels:
+#      - "traefik.enable=true"
+#      ## HTTP Routers
+#      - "traefik.http.routers.rancher-rtr.entrypoints=https"
+#      - "traefik.http.routers.rancher-rtr.rule=Host(`rancher.$DOMAINNAME`)"
+#      - "traefik.http.routers.rancher-rtr.tls=true" 
+#      ## Middlewares
+#      - "traefik.http.routers.rancher-rtr.middlewares=chain-no-auth@file" # No Authentication
+#      ## HTTP Services
+#      - "traefik.http.routers.rancher-rtr.service=rancher-svc"
+#      - "traefik.http.services.rancher-svc.loadbalancer.server.port=80"
+#    volumes:
+#      - $DOCKERDIR/rancher/config:/var/lib/rancher
+
+## Minecraft server with select-able version
+#  minecraft:
+#    image: itzg/minecraft-server
+#    container_name: minecraft
+#    restart: always
+#    command: --noconsole
+#    environment:
+#      - PUID=${PUID}
+#      - PGID=${PGID}
+#      - TZ=${TZ}
+#      - TYPE=PAPER
+#      - VERSION=1.14.4
+#      - MEMORY=2G
+#      - EULA=TRUE
+#    ports:
+#      - "25565:25565"
+#      - "8124:8124"
+#    volumes:
+#      - $DOCKERDIR/mc/data:/data
