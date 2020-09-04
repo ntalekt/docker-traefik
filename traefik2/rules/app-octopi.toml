@@ -1,0 +1,16 @@
+[http.routers]
+  [http.routers.octopi-rtr]
+      entryPoints = ["https"]
+      rule = "Host(`octopi.example.com`)"
+      service = "octopi-svc"
+      middlewares = ["chain-no-auth"]
+      [http.routers.octopi-rtr.tls]
+        certresolver = "dns-cloudflare"
+
+[http.services]
+  [http.services.octopi-svc]
+    [http.services.octopi-svc.loadBalancer]
+      passHostHeader = true
+      [[http.services.octopi-svc.loadBalancer.servers]]
+        url = "http://192.168.1.235"
+
