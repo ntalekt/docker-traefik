@@ -1,0 +1,20 @@
+[http.routers]
+  [http.routers.phpmyadmin-rtr]
+      entryPoints = ["https"]
+      rule = "Host(`phpmyadmin.example.com`)"
+      service = "phpmyadmin-svc"
+      middlewares = ["chain-no-auth", "phpmyadmin-add-admin"]
+      [http.routers.phpmyadmin-rtr.tls]
+        certresolver = "dns-cloudflare"
+
+[http.middlewares]
+  [http.middlewares.phpmyadmin-add-admin.addPrefix]
+    prefix = "/phpMyAdmin"
+
+[http.services]
+  [http.services.phpmyadmin-svc]
+    [http.services.phpmyadmin-svc.loadBalancer]
+      passHostHeader = true
+      [[http.services.phpmyadmin-svc.loadBalancer.servers]]
+        url = "https://192.168.1.108:8081"
+
