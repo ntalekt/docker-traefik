@@ -1,0 +1,15 @@
+[http.routers]
+  [http.routers.vcenter-rtr]
+      entryPoints = ["https"]
+      rule = "Host(`vc.example.com`)"
+      service = "vcenter-svc"
+      middlewares = ["chain-no-auth"]
+      [http.routers.vcenter-rtr.tls]
+        certresolver = "dns-cloudflare"
+
+[http.services]
+  [http.services.vcenter-svc]
+    [http.services.vcenter-svc.loadBalancer]
+      passHostHeader = true
+      [[http.services.vcenter-svc.loadBalancer.servers]]
+        url = "https://192.168.20.20"
