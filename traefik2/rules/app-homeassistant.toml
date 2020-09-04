@@ -1,0 +1,15 @@
+[http.routers]
+  [http.routers.ha-rtr]
+      entryPoints = ["https"]
+      rule = "Host(`ha.example.com`)"
+      service = "ha-svc"
+      middlewares = ["chain-no-auth"]
+      [http.routers.ha-rtr.tls]
+        certresolver = "dns-cloudflare"
+
+[http.services]
+  [http.services.ha-svc]
+    [http.services.ha-svc.loadBalancer]
+      passHostHeader = true
+      [[http.services.ha-svc.loadBalancer.servers]]
+        url = "http://192.168.1.254:8123"
